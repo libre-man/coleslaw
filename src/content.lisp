@@ -58,7 +58,14 @@
 (defmethod initialize-instance :after ((object content) &key)
   (with-slots (tags) object
     (when (stringp tags)
-      (setf tags (mapcar #'make-tag (cl-ppcre:split "," tags))))))
+      (setf tags (remove-if (lambda (el)
+                              (string= "" el))
+                            (mapcar #'make-tag
+                                    (cl-ppcre:split "," tags)))))))
+
+(defparameter +line-continuation-string+ (make-sequence 'string 4 :initial-element #\Space)
+  "The string that indicates that the next line should be parsed with the
+current line. A trailing comma will be inserted after the last line.")
 
 (defun parse-initarg (line)
   "Given a metadata header, LINE, parse an initarg name/value pair from it."
@@ -69,13 +76,23 @@
 
 (defun parse-metadata (stream)
   "Given a STREAM, parse metadata from it or signal an appropriate condition."
-  (flet ((get-next-line (input)
-           (string-trim '(#\Space #\Newline #\Tab) (read-line input nil))))
-    (unless (string= (get-next-line stream) (separator *config*))
-      (error "The file, ~a, lacks the expected header: ~a" (file-namestring stream) (separator *config*)))
-    (loop for line = (get-next-line stream)
-       until (string= line (separator *config*))
-       appending (parse-initarg line))))
+  (let ((last (read-line stream nil))
+        (continuation-string-len (length +line-continuation-string+)))
+    (flet ((get-next-line (input)
+             (loop for line = last then (read-line input nil)
+                   and start = t then nil
+                   while (or start
+                             (and (> (length line) continuation-string-len)
+                                  (string= +line-continuation-string+
+                                           (subseq line 0
+                                                   continuation-string-len))))
+                   collect line
+                   finally (setf last line))))
+      (unless (string= (get-next-line stream) (separator *config*))
+        (error "The file, ~a, lacks the expected header: ~a" (file-namestring stream) (separator *config*)))
+      (loop for line = (format nil "~{A~^, ~}" get-next-line stream)
+            until (string= line (separator *config*))
+            appending (parse-initarg line)))))
 
 (defun read-content (file)
   "Returns a plist of metadata from FILE with :text holding the content."
